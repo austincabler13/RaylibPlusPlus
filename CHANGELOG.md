@@ -1,6 +1,6 @@
-# Changelog
+# Raylib++ Changelog
 
-All notable changes in this fork of raylib are documented here.
+All notable changes in Raylib++, this fork of raylib, are documented here.
 Upstream raylib release notes live in [`CHANGELOG`](CHANGELOG). This fork is based on **raylib 6.2**.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).

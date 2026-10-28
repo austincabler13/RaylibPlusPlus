@@ -1,3 +1,11 @@
+# Raylib++
+
+**Raylib++ is a modified fork of [raylib](https://github.com/raysan5/raylib)** (based on raylib 6.2) that adds a modern C++17 game layer, [`raylib.hpp`](src/raylib.hpp), plus fixes for several software-renderer and web backend bugs. The C API is unchanged, so everything below applies as is. See [`CHANGELOG.md`](CHANGELOG.md) for what this fork adds and fixes, and the [C++ examples](examples/cpp) for a 2D platformer and a 3D third-person game.
+
+This is not the official raylib. The original library is by Ramon Santamaria and contributors under the zlib/libpng license, and the [LICENSE](LICENSE) is kept unchanged.
+
+---
+
 <img align="left" style="width:260px" src="https://github.com/raysan5/raylib/blob/master/logo/raylib_logo_animation.gif" width="288px">
 
 **raylib is a simple and easy-to-use library to enjoy videogames programming.**
