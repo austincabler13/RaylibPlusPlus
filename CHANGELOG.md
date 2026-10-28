@@ -37,7 +37,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - Example names now come from `NAME_WE` instead of `string(REPLACE ".c" ...)`, which would have mangled `.cpp` file names.
 - **Installs:** `raylib.hpp` is now installed with the other public headers by CMake (`raylib_public_headers`), `src/Makefile` (`install`/`uninstall`) and `build.zig`.
 
-### Known issues (upstream, not introduced by this fork)
+### Fixed
 
-- **Software renderer: screenshots come out flipped and with red and blue swapped.** With `GRAPHICS_API_OPENGL_SOFTWARE`, `glReadPixels()` maps to `swReadPixels()`. That function returns the presentation format: rows already top-down, and BGRA when `RLSW_FRAMEBUFFER_OUTPUT_BGRA` is true (the default). `rlReadScreenPixels()` assumes OpenGL semantics (bottom-up RGBA) and flips the rows again. As a result, `LoadImageFromScreen()` and `TakeScreenshot()` return upside-down images with red and blue swapped. Reproduce with `ClearBackground(RED)`: the screenshot pixel reads `(55, 41, 230)` instead of `(230, 41, 55)`.
-- **Software renderer: `LoadImageFromTexture()` always fails.** `rlReadTexturePixels()` has no `GRAPHICS_API_OPENGL_SOFTWARE` branch, and `glGetTexImage()` is a no-op macro in `rlsw.h`. Reading back any texture or render texture logs "Failed to retrieve pixel data" and returns an empty image.
+These are raylib bugs present in upstream 6.2, all in the **software renderer** (`GRAPHICS_API_OPENGL_SOFTWARE`, rlsw). Each has a regression test that fails before the fix and passes after it.
+
+- **`LoadImageFromScreen()` / `TakeScreenshot()` came out upside down with red and blue swapped.** `glReadPixels()` maps to `swReadPixels()`, which returns presentation-ready data: rows already top-down, and BGRA when `RLSW_FRAMEBUFFER_OUTPUT_BGRA` is true (the default). `rlReadScreenPixels()` assumed OpenGL semantics and flipped the rows again. The software path in `rlReadScreenPixels()` now skips the flip and swaps the channels back. `swReadPixels()` is unchanged, because 7 platform backends rely on it to display frames.
+- **`LoadImageFromTexture()` silently returned an all-black image.** In `rlsw.h`, `glGetTexImage()` was a no-op macro. rlgl's OpenGL 1.1 path (which the software renderer uses) still logged "Pixel data retrieved successfully" and returned zeroed memory. Added `swGetTexImage()`: a raw copy when formats match, per-pixel conversion otherwise, with rows in storage order as in OpenGL. `glGetTexImage()` now maps to it. This covers textures and render textures in every uncompressed 8-bit-based format.
+- **Heap buffer overflow in `swTexSubImage2D()`.** In the format-conversion path, the pixel read/write helpers take a pixel index, but the code passed byte offsets (`index*pixelSize`). It read and wrote up to 4x past the end of both buffers. AddressSanitizer flags it as a heap-buffer-overflow.
+- **Transparent pixels ignored after `UpdateTexture()`.** rlsw disables blending for textures flagged as opaque. `swTexSubImage2D()` never updated that flag when the formats matched, so an opaque texture updated with transparent pixels drew those pixels without blending. In the conversion path, it overwrote the flag for the whole texture using only the updated rectangle. Transparency can now be gained by an update but never lost.
+
+Bugs fixed in the C++ layer and examples during review:
+
+- **`rl::Timer` started running on construction**, which made the example players jump on the first frame (coyote and jump-buffer timers were both active). Timers are now created stopped, and `Start()` runs them.
+- **`rl::Timer::Stop()` didn't stop repeating timers:** the next `Update()` re-armed them and fired.
+- **`rl::FixedTimestep` with a step of 0 or less** made `Step()` return true forever, which hung the game loop. `Alpha()` also divided by zero. Both are now guarded.
+- **`rl::FrameStats::Draw()` divided by zero** when given a budget of 0.
+- **`rl::ScreenShake` lost float precision in long sessions.** The noise time now wraps while the shake is idle.
+- **`cpp_platformer_2d` queued one scene change per fixed step** when reaching the goal (up to several per frame).
+- **`cpp_third_person_3d` couldn't be completed:** three pillars (3 units tall) were higher than the jump (about 2 units) and too far from their neighbours to reach. Pillar heights are now 0.75 / 1.25 / 1.75.

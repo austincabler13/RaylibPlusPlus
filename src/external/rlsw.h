@@ -494,7 +494,7 @@ typedef double              GLclampd;
 #define glShadeModel(X)                             ((void)(X))
 #define glFrontFace(X)                              ((void)(X))
 #define glDepthFunc(X)                              ((void)(X))
-#define glGetTexImage(X,Y,Z,W,A)                    ((void)(X),(void)(Y),(void)(Z),(void)(W),(void)(A))
+#define glGetTexImage(tr, l, f, t, p)               swGetTexImage((f), (t), (p))
 #define glNormal3f(X,Y,Z)                           ((void)(X),(void)(Y),(void)(Z))
 #define glNormal3fv(X)                              ((void)(X))
 #define glNormalPointer(X,Y,Z)                      ((void)(X),(void)(Y),(void)(Z))
@@ -747,6 +747,7 @@ SWAPI void swDeleteTextures(int count, uint32_t *textures);
 SWAPI void swBindTexture(uint32_t id);
 SWAPI void swTexImage2D(int width, int height, SWformat format, SWtype type, const void *data);
 SWAPI void swTexSubImage2D(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, const void *pixels);
+SWAPI void swGetTexImage(SWformat format, SWtype type, void *pixels); // Read bound texture pixels, converting to requested format
 SWAPI void swTexParameteri(int param, int value);
 
 SWAPI void swGenFramebuffers(int count, uint32_t *framebuffers);
@@ -5004,6 +5005,11 @@ void swTexSubImage2D(GLint x, GLint y, GLsizei width, GLsizei height, GLenum for
     const uint8_t *srcBytes = (const uint8_t *)pixels;
     uint8_t *dstBytes = (uint8_t *)RLSW.boundTexture->pixels;
 
+    // Transparency can only be gained by a partial update, never lost (the rest of the texture is not checked)
+    const sw_pixel_alpha_t dstAlpha = SW_PIXELFORMAT_ALPHA[RLSW.boundTexture->format];
+    const bool trackAlpha = (dstAlpha != SW_PIXEL_ALPHA_NONE) && (RLSW.boundTexture->alpha == SW_PIXEL_ALPHA_NONE);
+    bool alphaFound = false;
+
     if (srcPixelFormat == RLSW.boundTexture->format)
     {
         const int rowSize = width*dstPixelSize;
@@ -5016,30 +5022,91 @@ void swTexSubImage2D(GLint x, GLint y, GLsizei width, GLsizei height, GLenum for
         for (int j = 0; j < height; ++j)
         {
             for (int i = 0; i < rowSize; ++i) dstRow[i] = srcRow[i];
+
+            if (trackAlpha && !alphaFound)
+            {
+                for (int i = 0; i < width; ++i)
+                {
+                    float color[4];
+                    readColor(color, srcRow, i);
+                    if (color[3] < 1.0f) { alphaFound = true; break; }
+                }
+            }
+
             dstRow += dstStride;
             srcRow += srcStride;
         }
-        return;
     }
-
-    bool alphaFound = false;
-
-    for (int j = 0; j < height; ++j)
+    else
     {
-        for (int i = 0; i < width; ++i)
+        for (int j = 0; j < height; ++j)
         {
-            float color[4];
-            const int srcPixelOffset = ((j*width) + i)*srcPixelSize;
-            const int dstPixelOffset = (((y + j)*RLSW.boundTexture->width) + (x + i))*dstPixelSize;
+            for (int i = 0; i < width; ++i)
+            {
+                float color[4];
 
-            readColor(color, srcBytes, srcPixelOffset);
-            alphaFound |= (color[3] < 1.0f);
+                // NOTE: Pixel read/write functions expect a pixel index, not a byte offset
+                const int srcPixelIndex = (j*width) + i;
+                const int dstPixelIndex = ((y + j)*RLSW.boundTexture->width) + (x + i);
 
-            writeColor(dstBytes, color, dstPixelOffset);
+                readColor(color, srcBytes, srcPixelIndex);
+                alphaFound |= (color[3] < 1.0f);
+
+                writeColor(dstBytes, color, dstPixelIndex);
+            }
         }
     }
 
-    RLSW.boundTexture->alpha = alphaFound? SW_PIXELFORMAT_ALPHA[srcPixelFormat] : SW_PIXEL_ALPHA_NONE;
+    if (trackAlpha && alphaFound) RLSW.boundTexture->alpha = dstAlpha;
+}
+
+void swGetTexImage(SWformat format, SWtype type, void *pixels)
+{
+    if (sw_immediate_is_active())
+    {
+        RLSW.errCode = SW_INVALID_OPERATION;
+        return;
+    }
+
+    if (!sw_is_texture_complete(RLSW.boundTexture) || (pixels == NULL))
+    {
+        RLSW.errCode = SW_INVALID_VALUE;
+        return;
+    }
+
+    const sw_texture_t *tex = RLSW.boundTexture;
+    sw_pixelformat_t dstPixelFormat = (sw_pixelformat_t)sw_pixel_get_format(format, type);
+    if (dstPixelFormat <= SW_PIXELFORMAT_UNKNOWN)
+    {
+        RLSW.errCode = SW_INVALID_ENUM;
+        return;
+    }
+
+    const int pixelCount = tex->width*tex->height;
+
+    // Same format: raw copy, rows in storage order (bottom-up for framebuffer attachments, like OpenGL)
+    if (dstPixelFormat == tex->format)
+    {
+        const int size = pixelCount*SW_PIXELFORMAT_SIZE[tex->format];
+        const uint8_t *src = (const uint8_t *)tex->pixels;
+        uint8_t *dst = (uint8_t *)pixels;
+        for (int i = 0; i < size; ++i) dst[i] = src[i];
+        return;
+    }
+
+    sw_pixel_write_color_f writeColor = sw_pixel_get_write_color_func(dstPixelFormat);
+    if ((tex->readColor == NULL) || (writeColor == NULL)) // Depth formats can not be converted to color
+    {
+        RLSW.errCode = SW_INVALID_OPERATION;
+        return;
+    }
+
+    for (int i = 0; i < pixelCount; ++i)
+    {
+        float color[4];
+        tex->readColor(color, tex->pixels, i);
+        writeColor(pixels, color, i);
+    }
 }
 
 void swTexParameteri(int param, int value)

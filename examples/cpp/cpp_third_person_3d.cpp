@@ -172,7 +172,7 @@ int main(void)
     for (int i = 0; i < 9; i++)
     {
         float angle = (float)i/9.0f*2.0f*PI;
-        float height = 1.0f + (float)(i%3)*1.0f;
+        float height = 0.75f + (float)(i%3)*0.5f;      // Max jump height is ~2 units, every top is reachable
         pillars.push_back({ Vector3{ cosf(angle)*12.0f, height/2.0f, sinf(angle)*12.0f }, Vector3{ 3.0f, height, 3.0f }, ColorFromHSV((float)i*40.0f, 0.45f, 0.9f) });
     }
     pillars.push_back({ Vector3{ 0.0f, 0.5f, -5.0f }, Vector3{ 4.0f, 1.0f, 2.0f }, LIGHTGRAY });

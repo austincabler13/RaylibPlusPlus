@@ -393,6 +393,8 @@ public:
     // Returns true while a simulation step is due, consuming it
     bool Step() noexcept
     {
+        if (step <= 0.0f) return false;     // Invalid step, avoid an endless loop
+
         if (accumulator >= step)
         {
             accumulator -= step;
@@ -404,7 +406,7 @@ public:
     }
 
     float Dt() const noexcept { return step; }
-    float Alpha() const noexcept { return (float)(accumulator/step); }
+    float Alpha() const noexcept { return (step > 0.0f)? (float)(accumulator/step) : 0.0f; }
     std::uint64_t StepCount() const noexcept { return stepCount; }
     void SetStep(float stepSeconds) noexcept { step = stepSeconds; }
     void Reset() noexcept { accumulator = 0.0; stepCount = 0; }
@@ -929,16 +931,17 @@ private:
 };
 
 // Countdown timer for cooldowns, spawners, invulnerability windows...
+// Timers are created stopped, Start() runs them, non-repeating timers stop after firing
 class Timer
 {
 public:
     Timer() = default;
-    explicit Timer(float seconds, bool repeating = false) : duration(seconds), remaining(seconds), repeat(repeating) {}
+    explicit Timer(float seconds, bool repeating = false) : duration(seconds), repeat(repeating) {}
 
     // Returns the number of times the timer fired during this update (0 or 1, more for repeating timers on long frames)
     int Update(float dt)
     {
-        if ((remaining <= 0.0f) && !repeat) return 0;
+        if (!running) return 0;
 
         remaining -= dt;
         int fired = 0;
@@ -954,17 +957,18 @@ public:
         else if (remaining <= 0.0f)
         {
             remaining = 0.0f;
+            running = false;
             fired = 1;
         }
 
         return fired;
     }
 
-    void Start() { remaining = duration; }
-    void Start(float newDuration) { duration = newDuration; remaining = newDuration; }
-    void Stop() { remaining = 0.0f; }
+    void Start() { remaining = duration; running = true; }
+    void Start(float newDuration) { duration = newDuration; Start(); }
+    void Stop() { remaining = 0.0f; running = false; }
 
-    bool IsRunning() const { return remaining > 0.0f; }
+    bool IsRunning() const { return running; }
     float Remaining() const { return remaining; }
     float Progress() const { return (duration > 0.0f)? 1.0f - remaining/duration : 1.0f; }
 
@@ -972,6 +976,7 @@ private:
     float duration = 0.0f;
     float remaining = 0.0f;
     bool repeat = false;
+    bool running = false;
 };
 
 //----------------------------------------------------------------------------------
@@ -1055,6 +1060,7 @@ public:
     {
         trauma = (trauma - decay*dt > 0.0f)? trauma - decay*dt : 0.0f;
         time += dt;
+        if ((trauma <= 0.0f) && (time > 1000.0f)) time = 0.0f;   // Keep float precision on long sessions (no visible jump while idle)
     }
 
     float Trauma() const { return trauma; }
@@ -1273,6 +1279,7 @@ public:
         ::DrawText(text, x + 4, y + 4, 10, RAYWHITE);
 
         int baseY = y + 22 + height;
+        if (budget <= 0.0f) budget = 1.0f/60.0f;
         float scale = (float)height/(budget*2.0f);
         ::DrawLine(x + 4, baseY - (int)(budget*scale), x + 4 + width, baseY - (int)(budget*scale), Color{ 255, 255, 255, 80 });
 

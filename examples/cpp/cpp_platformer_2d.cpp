@@ -213,6 +213,7 @@ public:
 
     void FixedUpdate(float dt) override
     {
+        if (finished) return;   // Scene change already requested, remaining steps this frame are skipped
         previousPosition = position;
 
         // Horizontal movement with acceleration
@@ -263,6 +264,7 @@ public:
 
         if (Overlaps(box, 'G'))
         {
+            finished = true;
             ctx.lastTime = elapsed;
             ctx.lastCoins = collectedCoins;
             Scenes().Replace<TitleScene>(ctx);
@@ -377,6 +379,7 @@ private:
     Vector2 velocity = { 0.0f, 0.0f };
     bool onGround = false;
     bool facingLeft = false;
+    bool finished = false;
     float moveInput = 0.0f;
     rl::Timer coyote{ 0.1f };
     rl::Timer jumpBuffer{ 0.12f };

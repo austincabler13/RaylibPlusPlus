@@ -3794,6 +3794,24 @@ unsigned char *rlReadScreenPixels(int width, int height)
 {
     unsigned char *imgData = (unsigned char *)RL_CALLOC(width*height*4, sizeof(unsigned char));
 
+#if defined(GRAPHICS_API_OPENGL_SOFTWARE)
+    // NOTE: rlsw returns framebuffer rows already top-down (ready for presentation), so no flip is needed,
+    // but channels come as BGRA when RLSW_FRAMEBUFFER_OUTPUT_BGRA is enabled (default), swap them back to RGBA
+    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, imgData);
+
+    for (int i = 0; i < width*height*4; i += 4)
+    {
+    #if RLSW_FRAMEBUFFER_OUTPUT_BGRA
+        unsigned char b = imgData[i];
+        imgData[i] = imgData[i + 2];
+        imgData[i + 2] = b;
+    #endif
+        imgData[i + 3] = 255; // Set alpha component value to 255 (no trasparent image retrieval)
+    }
+
+    return imgData;     // NOTE: image data should be freed
+#endif
+
     // NOTE: Buffer retrieved is GL_FRONT in single-buffered configurations
     // and GL_BACK in double-buffered configurations, make sure to call it at the end of frame
     //glReadBuffer(GL_BACK);
