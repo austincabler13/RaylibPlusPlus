@@ -47,6 +47,7 @@ features
   - **Animated 3D models** supported (skeletal bones animation, GPU-skinning) (IQM, M3D, glTF)
   - Shaders support, including model shaders and **postprocessing** shaders
   - **Powerful math module** for Vector, Matrix and Quaternion operations: [raymath](https://github.com/raysan5/raylib/blob/master/src/raymath.h)
+  - **Modern C++17 game layer** (optional, header-only): RAII resources, scenes, fixed timestep, input mapping, cameras, tweens: [raylib.hpp](src/raylib.hpp)
   - Audio loading and playing with streaming support (WAV, QOA, OGG, MP3, FLAC, XM, MOD)
   - **VR stereo rendering** support with configurable HMD device parameters
   - Huge examples collection with [+220 code examples](https://github.com/raysan5/raylib/tree/master/examples)!
@@ -87,6 +88,29 @@ int main(void)
     return 0;
 }
 ```
+
+C++ game layer
+--------------
+raylib also ships [`raylib.hpp`](src/raylib.hpp), an optional header-only C++17 layer with the systems most games need: RAII resources, scoped render states, fixed timestep with interpolation, input action mapping (keyboard, mouse and gamepad), asset caches, a scene stack, tweens and timers, camera follow, screen shake, orbit cameras and sprite animation. Wrappers convert implicitly to raylib types, so the full C API stays available.
+
+```cpp
+#include "raylib.hpp"
+
+int main()
+{
+    rl::Window window(800, 450, "raylib [cpp] example - basic window");
+    rl::Texture logo{ LoadTexture("logo.png") };    // Unloaded automatically
+
+    while (!window.ShouldClose())
+    {
+        rl::ScopedDrawing frame;
+        ClearBackground(RAYWHITE);
+        DrawTexture(logo, 10, 10, WHITE);
+    }
+}
+```
+
+Check the [C++ examples](examples/cpp) for a complete 2D platformer and a 3D third-person controller.
 
 build and installation
 ----------------------

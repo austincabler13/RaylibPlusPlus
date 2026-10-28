@@ -943,6 +943,7 @@ ifeq ($(ROOT),root)
         endif
         # Copying raylib development files to $(RAYLIB_H_INSTALL_PATH).
 		cp --update raylib.h $(RAYLIB_H_INSTALL_PATH)/raylib.h
+		cp --update raylib.hpp $(RAYLIB_H_INSTALL_PATH)/raylib.hpp
 		cp --update raymath.h $(RAYLIB_H_INSTALL_PATH)/raymath.h
 		cp --update rcamera.h $(RAYLIB_H_INSTALL_PATH)/rcamera.h
 		cp --update rlgl.h $(RAYLIB_H_INSTALL_PATH)/rlgl.h
@@ -971,6 +972,7 @@ ifeq ($(ROOT),root)
 			rm --force --interactive --verbose $(RAYLIB_INSTALL_PATH)/libraylib.a
         endif
 		rm --force --interactive --verbose $(RAYLIB_H_INSTALL_PATH)/raylib.h
+		rm --force --interactive --verbose $(RAYLIB_H_INSTALL_PATH)/raylib.hpp
 		rm --force --interactive --verbose $(RAYLIB_H_INSTALL_PATH)/raymath.h
 		rm --force --interactive --verbose $(RAYLIB_H_INSTALL_PATH)/rcamera.h
 		rm --force --interactive --verbose $(RAYLIB_H_INSTALL_PATH)/rlgl.h

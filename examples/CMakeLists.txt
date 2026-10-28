@@ -23,6 +23,7 @@ set(example_dirs
     shapes
     text
     textures
+    cpp
     )
 
 # Next few lines will check for existence of symbols or header files
@@ -61,8 +62,8 @@ endif ()
 set(example_sources)
 set(example_resources)
 foreach (example_dir ${example_dirs})
-    # Get the .c files
-    file(GLOB sources ${example_dir}/*.c)
+    # Get the .c files (and .cpp files, C++ examples using raylib.hpp)
+    file(GLOB sources ${example_dir}/*.c ${example_dir}/*.cpp)
     list(APPEND example_sources ${sources})
 
     # Any any resources
@@ -161,11 +162,15 @@ endif ()
 # Do each example
 foreach (example_source ${example_sources})
     # Create the basename for the example
-    get_filename_component(example_name ${example_source} NAME)
-    string(REPLACE ".c" "" example_name ${example_name})
+    get_filename_component(example_name ${example_source} NAME_WE)
 
     # Setup the example
     add_executable(${example_name} ${example_source})
+
+    # C++ examples require C++17 (raylib.hpp)
+    if ("${example_source}" MATCHES "\\.cpp$")
+        target_compile_features(${example_name} PRIVATE cxx_std_17)
+    endif ()
 
     target_link_libraries(${example_name} raylib)
     if (NOT WIN32)

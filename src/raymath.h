@@ -2845,6 +2845,11 @@ inline Vector2 operator - (const Vector2& lhs, const Vector2& rhs)
     return Vector2Subtract(lhs, rhs);
 }
 
+inline Vector2 operator - (const Vector2& v)
+{
+    return Vector2Negate(v);
+}
+
 inline const Vector2& operator -= (Vector2& lhs, const Vector2& rhs)
 {
     lhs = Vector2Subtract(lhs, rhs);
@@ -2942,6 +2947,11 @@ inline const Vector3& operator += (Vector3& lhs, const Vector3& rhs)
 inline Vector3 operator - (const Vector3& lhs, const Vector3& rhs)
 {
     return Vector3Subtract(lhs, rhs);
+}
+
+inline Vector3 operator - (const Vector3& v)
+{
+    return Vector3Negate(v);
 }
 
 inline const Vector3& operator -= (Vector3& lhs, const Vector3& rhs)
@@ -3042,6 +3052,11 @@ inline const Vector4& operator += (Vector4& lhs, const Vector4& rhs)
 inline Vector4 operator - (const Vector4& lhs, const Vector4& rhs)
 {
     return Vector4Subtract(lhs, rhs);
+}
+
+inline Vector4 operator - (const Vector4& v)
+{
+    return Vector4Negate(v);
 }
 
 inline const Vector4& operator -= (Vector4& lhs, const Vector4& rhs)
