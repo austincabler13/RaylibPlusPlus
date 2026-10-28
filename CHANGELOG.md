@@ -46,6 +46,8 @@ These are raylib bugs present in upstream 6.2, all in the **software renderer** 
 - **Heap buffer overflow in `swTexSubImage2D()`.** In the format-conversion path, the pixel read/write helpers take a pixel index, but the code passed byte offsets (`index*pixelSize`). It read and wrote up to 4x past the end of both buffers. AddressSanitizer flags it as a heap-buffer-overflow.
 - **Transparent pixels ignored after `UpdateTexture()`.** rlsw disables blending for textures flagged as opaque. `swTexSubImage2D()` never updated that flag when the formats matched, so an opaque texture updated with transparent pixels drew those pixels without blending. In the conversion path, it overwrote the flag for the whole texture using only the updated rectangle. Transparency can now be gained by an update but never lost.
 
+- **Web (RGFW backend): every standard raylib program froze the browser tab.** `WindowShouldClose()` in the RGFW backend never gave control back to the browser, so a normal `while (!WindowShouldClose())` loop blocked the page forever. Under `PLATFORM_WEB_RGFW` it now calls `emscripten_sleep()` once per frame, as the GLFW web backend already does (requires `-sASYNCIFY`, like all raylib web builds). Native RGFW builds are unchanged.
+
 Bugs fixed in the C++ layer and examples during review:
 
 - **`rl::Timer` started running on construction**, which made the example players jump on the first frame (coyote and jump-buffer timers were both active). Timers are now created stopped, and `Start()` runs them.

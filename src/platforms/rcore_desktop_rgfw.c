@@ -68,6 +68,7 @@
 
 #if defined(PLATFORM_WEB_RGFW)
     #define RGFW_NO_GL_HEADER
+    #include <emscripten/emscripten.h>      // Required for: emscripten_sleep()
 #endif
 
 #if defined(GRAPHICS_API_OPENGL_ES2) && !defined(PLATFORM_WEB_RGFW)
@@ -761,6 +762,12 @@ bool InitGraphicsDevice(void);   // Initialize graphics device
 // Check if application should close
 bool WindowShouldClose(void)
 {
+#if defined(PLATFORM_WEB_RGFW)
+    // Give control back to the browser once per frame (requires -sASYNCIFY), same as PLATFORM_WEB backend,
+    // otherwise a standard while (!WindowShouldClose()) loop never yields and freezes the browser tab
+    emscripten_sleep(12);
+#endif
+
     if (CORE.Window.shouldClose == false) CORE.Window.shouldClose = RGFW_window_shouldClose(platform.window);
     if (CORE.Window.ready) return CORE.Window.shouldClose;
     return true;
