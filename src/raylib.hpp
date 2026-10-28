@@ -17,7 +17,11 @@
 *         rl::ScopedTextureMode, rl::ScopedShaderMode, rl::ScopedBlendMode, rl::ScopedScissorMode
 *       - rl::FixedTimestep: deterministic fixed-rate simulation with render interpolation
 *       - rl::InputMap: named actions and axes bound to keyboard, mouse and gamepad
-*       - rl::AssetCache: path-keyed asset caches that load once and share
+*       - rl::AssetCache: path-keyed asset caches that load once and share, with hot reload
+*       - rl::HotShader: shader that reloads when its files change, keeps the last working version
+*       - rl::Registry: sparse-set entity component system (ECS)
+*       - rl::EventBus: typed publish/subscribe with auto-unsubscribing rl::Subscription
+*       - RL_PROFILE_SCOPE / rl::Profiler: named CPU timing scopes with an on-screen tree
 *       - rl::SceneStack: game states/screens with deferred push/pop/replace and overlays
 *       - rl::Run(): ready-to-use game loop driving a SceneStack with a FixedTimestep
 *       - rl::Timer, rl::Tween<T>, rl::ease::*: gameplay timers, tweening and easing curves
@@ -86,12 +90,15 @@
 #include "raylib.h"
 #include "raymath.h"
 
+#include <atomic>
+#include <cassert>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <functional>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -640,11 +647,26 @@ template <> struct AssetLoader<Wave> { static ::Wave Load(const std::string &pat
 template <> struct AssetLoader<Sound> { static ::Sound Load(const std::string &path) { return ::LoadSound(path.c_str()); } };
 template <> struct AssetLoader<Music> { static ::Music Load(const std::string &path) { return ::LoadMusicStream(path.c_str()); } };
 
+namespace detail {
+    // Validity checks used by hot reload to keep the previous version of an asset that failed to load
+    template <typename T> bool IsAssetValid(const T &) { return true; }
+    inline bool IsAssetValid(const ::Image &v) { return ::IsImageValid(v); }
+    inline bool IsAssetValid(const ::Texture &v) { return ::IsTextureValid(v); }
+    inline bool IsAssetValid(const ::Font &v) { return ::IsFontValid(v); }
+    inline bool IsAssetValid(const ::Model &v) { return ::IsModelValid(v); }
+    inline bool IsAssetValid(const ::Wave &v) { return ::IsWaveValid(v); }
+    inline bool IsAssetValid(const ::Sound &v) { return ::IsSoundValid(v); }
+    inline bool IsAssetValid(const ::Music &v) { return ::IsMusicValid(v); }
+}
+
 // Loads every asset once and hands out references to the cached copy
 // References stay valid until the asset is unloaded or the cache is cleared/destroyed
 //
 //     rl::TextureCache textures;
 //     DrawTexture(textures.Get("resources/hero.png"), 0, 0, WHITE);
+//
+// Hot reload: call ReloadChanged() (i.e. twice per second) to reload assets whose files were
+// saved since they were loaded, the game keeps running with the new version
 template <typename H>
 class AssetCache
 {
@@ -663,16 +685,58 @@ public:
     H &Get(const std::string &key)
     {
         auto it = assets.find(key);
-        if (it == assets.end()) it = assets.emplace(key, H{ loader(key) }).first;
-        return it->second;
+        if (it == assets.end())
+        {
+            Entry entry;
+            entry.asset.Reset(loader(key));
+            entry.modTime = FileStamp(key);
+            it = assets.emplace(key, std::move(entry)).first;
+        }
+
+        return it->second.asset;
     }
 
     // Store an already loaded resource under a key, replacing (and unloading) any previous one
+    // Inserted assets are not hot reloaded
     H &Insert(const std::string &key, H &&asset)
     {
-        H &slot = assets[key];
-        slot = std::move(asset);
-        return slot;
+        Entry &slot = assets[key];
+        slot.asset = std::move(asset);
+        slot.modTime = 0;
+        return slot.asset;
+    }
+
+    // Reload assets whose file changed on disk, returns how many were reloaded
+    // Assets are replaced in place, so references returned by Get() see the new version,
+    // but raw copies (i.e. a ::Texture copied into a struct) keep the old, now unloaded, one
+    // A file that fails to load (i.e. saved half-way) keeps the previous version
+    // NOTE: File times have a 1 second resolution on most systems
+    int ReloadChanged()
+    {
+        int reloaded = 0;
+
+        for (auto &item : assets)
+        {
+            Entry &entry = item.second;
+            if (entry.modTime == 0) continue;
+
+            long modTime = FileStamp(item.first);
+            if ((modTime == 0) || (modTime == entry.modTime)) continue;
+            entry.modTime = modTime;
+
+            typename H::value_type fresh = loader(item.first);
+            if (!detail::IsAssetValid(fresh))
+            {
+                H discard{ fresh };
+                ::TraceLog(LOG_WARNING, "ASSET: [%s] Reload failed, keeping previous version", item.first.c_str());
+                continue;
+            }
+
+            entry.asset.Reset(fresh);
+            reloaded++;
+        }
+
+        return reloaded;
     }
 
     bool Contains(const std::string &key) const { return assets.find(key) != assets.end(); }
@@ -681,8 +745,76 @@ public:
     std::size_t Count() const noexcept { return assets.size(); }
 
 private:
+    struct Entry
+    {
+        H asset;
+        long modTime = 0;       // 0: not backed by a file, never hot reloaded
+    };
+
+    static long FileStamp(const std::string &key) { return ::FileExists(key.c_str())? ::GetFileModTime(key.c_str()) : 0; }
+
     Loader loader;
-    std::unordered_map<std::string, H> assets;   // Node-based: references survive rehashing
+    std::unordered_map<std::string, Entry> assets;   // Node-based: references survive rehashing
+};
+
+// Shader loaded from files that reloads itself when they change
+// On compile errors the last working version is kept (the default shader if none worked yet)
+//
+//     rl::HotShader water("shaders/water.vs", "shaders/water.fs");
+//     if (water.ReloadIfChanged()) timeLoc = GetShaderLocation(water, "time");   // Locations must be queried again
+class HotShader
+{
+public:
+    HotShader() = default;
+    HotShader(std::string vertexPath, std::string fragmentPath) : vsPath(std::move(vertexPath)), fsPath(std::move(fragmentPath))
+    {
+        vsTime = FileStamp(vsPath);
+        fsTime = FileStamp(fsPath);
+        Load();
+    }
+
+    // Returns true when the shader was reloaded successfully
+    bool ReloadIfChanged()
+    {
+        long vs = FileStamp(vsPath);
+        long fs = FileStamp(fsPath);
+        if ((vs == vsTime) && (fs == fsTime)) return false;
+
+        vsTime = vs;
+        fsTime = fs;
+        return Load();
+    }
+
+    const ::Shader &Get() const noexcept { return shader.Get(); }
+    ::Shader &Get() noexcept { return shader.Get(); }
+    const ::Shader *operator->() const noexcept { return &shader.Get(); }
+    ::Shader *operator->() noexcept { return &shader.Get(); }
+    operator const ::Shader &() const noexcept { return shader.Get(); }
+
+private:
+    static long FileStamp(const std::string &path) { return (!path.empty() && ::FileExists(path.c_str()))? ::GetFileModTime(path.c_str()) : 0; }
+
+    bool Load()
+    {
+        ::Shader loaded = ::LoadShader(vsPath.empty()? nullptr : vsPath.c_str(), fsPath.empty()? nullptr : fsPath.c_str());
+
+        if (!::IsShaderValid(loaded))
+        {
+            ::UnloadShader(loaded);
+            ::TraceLog(LOG_WARNING, "SHADER: [%s, %s] Reload failed, keeping previous version", vsPath.c_str(), fsPath.c_str());
+            if (!shader.Owns()) shader.Reset(::LoadShader(nullptr, nullptr));   // Default shader, safe to draw with
+            return false;
+        }
+
+        shader.Reset(loaded);
+        return true;
+    }
+
+    std::string vsPath;
+    std::string fsPath;
+    long vsTime = 0;
+    long fsTime = 0;
+    Shader shader;
 };
 
 using ImageCache = AssetCache<Image>;
@@ -692,6 +824,568 @@ using ModelCache = AssetCache<Model>;
 using WaveCache = AssetCache<Wave>;
 using SoundCache = AssetCache<Sound>;
 using MusicCache = AssetCache<Music>;
+
+//----------------------------------------------------------------------------------
+// Events
+//----------------------------------------------------------------------------------
+
+namespace detail {
+    // Process-wide index per type, shared by EventBus and Registry
+    inline std::size_t NextTypeIndex() { static std::atomic<std::size_t> next{ 0 }; return next++; }
+    template <typename T> std::size_t TypeIndex() { static const std::size_t index = NextTypeIndex(); return index; }
+
+    struct EventChannels
+    {
+        struct Handler { std::uint64_t id; std::shared_ptr<std::function<void(const void *)>> call; };
+
+        std::vector<std::vector<Handler>> channels;
+        std::vector<std::function<void()>> queued;
+        std::uint64_t nextId = 0;
+        int emitting = 0;
+        bool dirty = false;
+
+        void Unsubscribe(std::size_t type, std::uint64_t id)
+        {
+            if (type >= channels.size()) return;
+            std::vector<Handler> &list = channels[type];
+
+            for (std::size_t i = 0; i < list.size(); i++)
+            {
+                if (list[i].id != id) continue;
+
+                // While emitting, only disable it: the list is being walked
+                if (emitting > 0) { list[i].call = nullptr; dirty = true; }
+                else list.erase(list.begin() + (std::ptrdiff_t)i);
+                break;
+            }
+        }
+
+        template <typename E>
+        void Emit(const E &event)
+        {
+            std::size_t type = TypeIndex<E>();
+            if (type >= channels.size()) return;
+
+            emitting++;
+            // Handlers subscribed during this emit are not called until the next one
+            std::size_t count = channels[type].size();
+            for (std::size_t i = 0; i < count; i++)
+            {
+                // Keep the handler alive during the call even if it unsubscribes itself
+                std::shared_ptr<std::function<void(const void *)>> call = channels[type][i].call;
+                if (call) (*call)(&event);
+            }
+            emitting--;
+
+            if ((emitting == 0) && dirty)
+            {
+                for (std::vector<Handler> &list : channels)
+                {
+                    std::size_t kept = 0;
+                    for (std::size_t i = 0; i < list.size(); i++) if (list[i].call) list[kept++] = std::move(list[i]);
+                    list.resize(kept);
+                }
+                dirty = false;
+            }
+        }
+    };
+}
+
+// Keeps an event handler registered, unsubscribes it on destruction
+// Store it next to whatever the handler captures (i.e. as a member of the scene)
+class Subscription
+{
+public:
+    Subscription() = default;
+    ~Subscription() { Reset(); }
+
+    Subscription(const Subscription &) = delete;
+    Subscription &operator=(const Subscription &) = delete;
+    Subscription(Subscription &&other) noexcept : channels(std::move(other.channels)), type(other.type), id(other.id) {}
+    Subscription &operator=(Subscription &&other) noexcept
+    {
+        if (this != &other)
+        {
+            Reset();
+            channels = std::move(other.channels);
+            type = other.type;
+            id = other.id;
+        }
+
+        return *this;
+    }
+
+    void Reset()
+    {
+        if (std::shared_ptr<detail::EventChannels> bus = channels.lock()) bus->Unsubscribe(type, id);
+        channels.reset();
+    }
+
+    bool IsActive() const { return !channels.expired(); }
+
+private:
+    friend class EventBus;
+    Subscription(const std::shared_ptr<detail::EventChannels> &bus, std::size_t eventType, std::uint64_t handlerId)
+        : channels(bus), type(eventType), id(handlerId) {}
+
+    std::weak_ptr<detail::EventChannels> channels;   // Weak: the bus can be destroyed first safely
+    std::size_t type = 0;
+    std::uint64_t id = 0;
+};
+
+// Typed publish/subscribe so systems react to each other without depending on each other
+//
+//     struct CoinCollected { int value; };
+//     rl::Subscription sub = events.Subscribe<CoinCollected>([&](const CoinCollected &e) { score += e.value; });
+//     events.Emit(CoinCollected{ 10 });        // Delivered now
+//     events.Queue(CoinCollected{ 10 });       // Delivered on events.Flush(), i.e. once per frame
+class EventBus
+{
+public:
+    EventBus() : channels(std::make_shared<detail::EventChannels>()) {}
+
+    EventBus(const EventBus &) = delete;
+    EventBus &operator=(const EventBus &) = delete;
+
+    template <typename E, typename Fn>
+    [[nodiscard]] Subscription Subscribe(Fn &&handler)
+    {
+        std::size_t type = detail::TypeIndex<E>();
+        if (type >= channels->channels.size()) channels->channels.resize(type + 1);
+
+        std::uint64_t id = ++channels->nextId;
+        auto call = std::make_shared<std::function<void(const void *)>>(
+            [fn = std::forward<Fn>(handler)](const void *event) mutable { fn(*static_cast<const E *>(event)); });
+        channels->channels[type].push_back({ id, std::move(call) });
+
+        return Subscription(channels, type, id);
+    }
+
+    template <typename E>
+    void Emit(const E &event) { channels->Emit(event); }
+
+    template <typename E>
+    void Queue(E event)
+    {
+        std::weak_ptr<detail::EventChannels> bus = channels;
+        channels->queued.push_back([bus, e = std::move(event)]() { if (auto b = bus.lock()) b->Emit(e); });
+    }
+
+    // Deliver queued events, events queued by handlers during Flush() wait for the next one
+    void Flush()
+    {
+        std::vector<std::function<void()>> pending = std::move(channels->queued);
+        channels->queued.clear();
+        for (std::function<void()> &deliver : pending) deliver();
+    }
+
+    template <typename E>
+    std::size_t SubscriberCount() const
+    {
+        std::size_t type = detail::TypeIndex<E>();
+        if (type >= channels->channels.size()) return 0;
+
+        std::size_t count = 0;
+        for (const auto &handler : channels->channels[type]) if (handler.call) count++;
+        return count;
+    }
+
+private:
+    std::shared_ptr<detail::EventChannels> channels;
+};
+
+//----------------------------------------------------------------------------------
+// Entity component system
+//----------------------------------------------------------------------------------
+
+// Lightweight entity handle, a destroyed entity's handle never becomes valid again
+struct Entity
+{
+    std::uint32_t index = 0xffffffffu;
+    std::uint32_t generation = 0;
+
+    bool operator==(const Entity &other) const { return (index == other.index) && (generation == other.generation); }
+    bool operator!=(const Entity &other) const { return !(*this == other); }
+};
+
+// Sparse-set entity component system: components of a type are stored packed in one
+// array, so iterating them is cache friendly; any copyable or movable type is a component
+//
+//     struct Position { Vector2 value; };
+//     struct Velocity { Vector2 value; };
+//     rl::Entity e = world.Create();
+//     world.Add<Position>(e, Vector2{ 0, 0 });
+//     world.Add<Velocity>(e, Vector2{ 10, 0 });
+//     world.Each<Velocity, Position>([&](rl::Entity, Velocity &v, Position &p) { p.value += v.value*dt; });
+//
+// NOTE: Each() walks the first component type listed, put the rarest one first
+class Registry
+{
+public:
+    Registry() = default;
+    Registry(const Registry &) = delete;
+    Registry &operator=(const Registry &) = delete;
+    Registry(Registry &&) = default;
+    Registry &operator=(Registry &&) = default;
+
+    Entity Create()
+    {
+        std::uint32_t index = 0;
+
+        if (!freeList.empty())
+        {
+            index = freeList.back();
+            freeList.pop_back();
+        }
+        else
+        {
+            index = (std::uint32_t)generations.size();
+            generations.push_back(0);
+        }
+
+        alive++;
+        return Entity{ index, generations[index] };
+    }
+
+    // Destroy an entity and all its components, does nothing for invalid handles
+    void Destroy(Entity entity)
+    {
+        if (!Valid(entity)) return;
+
+        for (std::unique_ptr<PoolBase> &pool : pools) if (pool) pool->Remove(entity.index);
+        generations[entity.index]++;
+        freeList.push_back(entity.index);
+        alive--;
+    }
+
+    bool Valid(Entity entity) const
+    {
+        // Destroying an entity bumps its index generation, so stale handles never match again
+        return (entity.index < generations.size()) && (generations[entity.index] == entity.generation);
+    }
+
+    std::size_t Alive() const noexcept { return alive; }
+
+    // Destroy all entities
+    void Clear()
+    {
+        pools.clear();
+        freeList.clear();
+        for (std::uint32_t i = 0; i < (std::uint32_t)generations.size(); i++)
+        {
+            generations[i]++;
+            freeList.push_back(i);
+        }
+        alive = 0;
+    }
+
+    // Add (or replace) a component, arguments are forwarded to its constructor or aggregate initializer
+    template <typename T, typename... Args>
+    T &Add(Entity entity, Args &&...args)
+    {
+        assert(Valid(entity) && "rl::Registry::Add(): invalid entity");
+        if constexpr (std::is_aggregate_v<T>) return PoolFor<T>().Insert(entity.index, T{ std::forward<Args>(args)... });
+        else return PoolFor<T>().Insert(entity.index, T(std::forward<Args>(args)...));
+    }
+
+    template <typename T>
+    void Remove(Entity entity) { if (Valid(entity)) if (Pool<T> *pool = FindPool<T>()) pool->Remove(entity.index); }
+
+    template <typename T>
+    bool Has(Entity entity) const
+    {
+        const Pool<T> *pool = FindPool<T>();
+        return Valid(entity) && (pool != nullptr) && pool->Has(entity.index);
+    }
+
+    // Component pointer, nullptr if the entity is invalid or lacks it
+    template <typename T>
+    T *TryGet(Entity entity)
+    {
+        Pool<T> *pool = FindPool<T>();
+        return (Valid(entity) && (pool != nullptr))? pool->Find(entity.index) : nullptr;
+    }
+
+    template <typename T>
+    const T *TryGet(Entity entity) const { return const_cast<Registry *>(this)->TryGet<T>(entity); }
+
+    // Component reference, the entity must have it (check with Has() or use TryGet())
+    template <typename T>
+    T &Get(Entity entity)
+    {
+        T *component = TryGet<T>(entity);
+        assert((component != nullptr) && "rl::Registry::Get(): entity lacks the component");
+        return *component;
+    }
+
+    template <typename T>
+    std::size_t Count() const
+    {
+        const Pool<T> *pool = FindPool<T>();
+        return (pool != nullptr)? pool->entities.size() : 0;
+    }
+
+    // Call fn(Entity, First &, Rest &...) for every entity having all the listed components
+    // Destroying the current entity (or removing its components) inside fn is safe; adding
+    // components of the iterated types or destroying other entities may skip or repeat some,
+    // collect those and apply them after Each() returns
+    template <typename First, typename... Rest, typename Fn>
+    void Each(Fn &&fn)
+    {
+        Pool<First> *first = FindPool<First>();
+        if (first == nullptr) return;
+        if (((FindPool<Rest>() == nullptr) || ...)) return;
+
+        for (std::size_t i = first->entities.size(); i-- > 0;)
+        {
+            if (i >= first->entities.size()) continue;
+            std::uint32_t index = first->entities[i];
+            if (!(FindPool<Rest>()->Has(index) && ...)) continue;
+
+            fn(Entity{ index, generations[index] }, first->data[i], *FindPool<Rest>()->Find(index)...);
+        }
+    }
+
+private:
+    struct PoolBase
+    {
+        virtual ~PoolBase() = default;
+        virtual void Remove(std::uint32_t index) = 0;
+    };
+
+    template <typename T>
+    struct Pool : PoolBase
+    {
+        std::vector<std::uint32_t> sparse;      // Entity index -> dense position + 1 (0: absent)
+        std::vector<std::uint32_t> entities;    // Dense: entity indices
+        std::vector<T> data;                    // Dense: components, same order as entities
+
+        bool Has(std::uint32_t index) const { return (index < sparse.size()) && (sparse[index] != 0); }
+        T *Find(std::uint32_t index) { return Has(index)? &data[sparse[index] - 1] : nullptr; }
+
+        T &Insert(std::uint32_t index, T &&component)
+        {
+            if (Has(index))
+            {
+                T &slot = data[sparse[index] - 1];
+                slot = std::move(component);
+                return slot;
+            }
+
+            if (index >= sparse.size()) sparse.resize((std::size_t)index + 1, 0);
+            entities.push_back(index);
+            data.push_back(std::move(component));
+            sparse[index] = (std::uint32_t)entities.size();
+            return data.back();
+        }
+
+        void Remove(std::uint32_t index) override
+        {
+            if (!Has(index)) return;
+
+            std::uint32_t position = sparse[index] - 1;
+            std::uint32_t lastPosition = (std::uint32_t)entities.size() - 1;
+
+            // Swap with the last element and pop, keeps the arrays packed
+            if (position != lastPosition)
+            {
+                std::uint32_t lastIndex = entities[lastPosition];
+                entities[position] = lastIndex;
+                data[position] = std::move(data[lastPosition]);
+                sparse[lastIndex] = position + 1;
+            }
+
+            entities.pop_back();
+            data.pop_back();
+            sparse[index] = 0;
+        }
+    };
+
+    template <typename T>
+    Pool<T> *FindPool() const
+    {
+        std::size_t type = detail::TypeIndex<T>();
+        return (type < pools.size())? static_cast<Pool<T> *>(pools[type].get()) : nullptr;
+    }
+
+    template <typename T>
+    Pool<T> &PoolFor()
+    {
+        std::size_t type = detail::TypeIndex<T>();
+        if (type >= pools.size()) pools.resize(type + 1);
+        if (!pools[type]) pools[type] = std::make_unique<Pool<T>>();
+        return *static_cast<Pool<T> *>(pools[type].get());
+    }
+
+    std::vector<std::unique_ptr<PoolBase>> pools;   // Indexed by component type index
+    std::vector<std::uint32_t> generations;         // Per entity index
+    std::vector<std::uint32_t> freeList;            // Destroyed indices ready for reuse
+    std::size_t alive = 0;
+};
+
+//----------------------------------------------------------------------------------
+// Profiling
+//----------------------------------------------------------------------------------
+
+// CPU timing of named scopes, averaged over frames, with an on-screen breakdown
+// rl::Run() measures Update, FixedUpdate, Draw and Present (EndDrawing) automatically
+//
+//     void Simulate() { RL_PROFILE_SCOPE("Physics"); ... }
+//     rl::GlobalProfiler().Draw(10, 10);
+class Profiler
+{
+public:
+    struct Entry
+    {
+        std::string name;
+        int depth = 0;          // Nesting level when first seen
+        std::size_t parent = (std::size_t)-1;   // Enclosing scope when first seen, -1 for top level
+        float averageMs = 0.0f; // Smoothed time per frame
+        float peakMs = 0.0f;    // Recent peak, decays slowly
+        int calls = 0;          // Calls during the last frame
+        double frameSeconds = 0.0;
+        int frameCalls = 0;
+        bool seen = false;
+    };
+
+    void Begin(const char *name)
+    {
+        if (!enabled) return;
+
+        std::size_t index = 0;
+        auto cached = byPointer.find(name);
+
+        // Pointer cache is checked against the name: a reused buffer may hold a different one
+        if ((cached != byPointer.end()) && (entries[cached->second].name == name)) index = cached->second;
+        else
+        {
+            auto named = byName.find(name);
+            if (named != byName.end()) index = named->second;
+            else
+            {
+                index = entries.size();
+                Entry entry;
+                entry.name = name;
+                entry.depth = (int)stack.size();
+                if (!stack.empty()) entry.parent = stack.back().first;
+                entries.push_back(std::move(entry));
+                byName.emplace(name, index);
+            }
+            byPointer[name] = index;
+        }
+
+        stack.push_back({ index, ::GetTime() });
+    }
+
+    void End()
+    {
+        if (!enabled || stack.empty()) return;
+
+        Entry &entry = entries[stack.back().first];
+        entry.frameSeconds += ::GetTime() - stack.back().second;
+        entry.frameCalls++;
+        stack.pop_back();
+    }
+
+    // Close the frame's measurements, call once per frame (rl::Run() does)
+    void NewFrame()
+    {
+        stack.clear();
+
+        for (Entry &entry : entries)
+        {
+            float ms = (float)(entry.frameSeconds*1000.0);
+            entry.averageMs = entry.seen? entry.averageMs*0.9f + ms*0.1f : ms;
+            entry.peakMs = (ms > entry.peakMs*0.995f)? ms : entry.peakMs*0.995f;
+            entry.calls = entry.frameCalls;
+            entry.frameSeconds = 0.0;
+            entry.frameCalls = 0;
+            entry.seen = true;
+        }
+    }
+
+    void SetEnabled(bool value) { enabled = value; if (!value) stack.clear(); }
+    bool IsEnabled() const { return enabled; }
+    const std::vector<Entry> &Entries() const { return entries; }
+    void Reset() { entries.clear(); byName.clear(); byPointer.clear(); stack.clear(); }
+
+    // Draw the breakdown as a tree, bars are scaled to budgetMs (a 60 fps frame by default)
+    void Draw(int x, int y, float budgetMs = 1000.0f/60.0f) const
+    {
+        const int rowHeight = 14;
+        const int width = 345;
+        const int height = 24 + (int)entries.size()*rowHeight;
+        const int avgX = x + 150, peakX = x + 192, callsX = x + 236, barX = x + 275, barMax = 62;
+        if (budgetMs <= 0.0f) budgetMs = 1000.0f/60.0f;
+
+        ::DrawRectangle(x, y, width, height, Color{ 0, 0, 0, 170 });
+        ::DrawText("scope", x + 6, y + 6, 10, GRAY);
+        ::DrawText("avg ms", avgX, y + 6, 10, GRAY);
+        ::DrawText("peak", peakX, y + 6, 10, GRAY);
+        ::DrawText("calls", callsX, y + 6, 10, GRAY);
+
+        std::vector<std::size_t> order = TreeOrder();
+        for (std::size_t row = 0; row < order.size(); row++)
+        {
+            const Entry &entry = entries[order[row]];
+            int rowY = y + 22 + (int)row*rowHeight;
+            float share = entry.averageMs/budgetMs;
+            int barWidth = (int)(share*(float)barMax);
+            if (barWidth > barMax) barWidth = barMax;
+
+            ::DrawRectangle(barX, rowY + 1, barWidth, rowHeight - 4, (share > 0.5f)? ORANGE : SKYBLUE);
+            ::DrawText(entry.name.c_str(), x + 6 + entry.depth*10, rowY, 10, RAYWHITE);
+            ::DrawText(::TextFormat("%.2f", entry.averageMs), avgX, rowY, 10, RAYWHITE);
+            ::DrawText(::TextFormat("%.2f", entry.peakMs), peakX, rowY, 10, RAYWHITE);
+            ::DrawText(::TextFormat("%i", entry.calls), callsX, rowY, 10, RAYWHITE);
+        }
+    }
+
+    // Entry indices with every scope listed right after the scope that encloses it
+    std::vector<std::size_t> TreeOrder() const
+    {
+        std::vector<std::size_t> order;
+        order.reserve(entries.size());
+        AppendChildren((std::size_t)-1, order);
+        return order;
+    }
+
+private:
+    std::vector<Entry> entries;
+    std::unordered_map<std::string, std::size_t> byName;
+    std::unordered_map<const void *, std::size_t> byPointer;   // Fast path for string literals
+    std::vector<std::pair<std::size_t, double>> stack;
+    bool enabled = true;
+
+    void AppendChildren(std::size_t parent, std::vector<std::size_t> &order) const
+    {
+        for (std::size_t i = 0; i < entries.size(); i++)
+        {
+            if (entries[i].parent != parent) continue;
+            order.push_back(i);
+            AppendChildren(i, order);
+        }
+    }
+};
+
+// Profiler used by RL_PROFILE_SCOPE() and rl::Run()
+inline Profiler &GlobalProfiler()
+{
+    static Profiler profiler;
+    return profiler;
+}
+
+class ProfileScope
+{
+public:
+    [[nodiscard]] explicit ProfileScope(const char *name, Profiler &target = GlobalProfiler()) : profiler(target) { profiler.Begin(name); }
+    ~ProfileScope() { profiler.End(); }
+    ProfileScope(const ProfileScope &) = delete;
+    ProfileScope &operator=(const ProfileScope &) = delete;
+
+private:
+    Profiler &profiler;
+};
 
 //----------------------------------------------------------------------------------
 // Scenes
@@ -826,18 +1520,31 @@ inline void Run(SceneStack &scenes, FixedTimestep &timestep)
 {
     while (!::WindowShouldClose())
     {
+        GlobalProfiler().NewFrame();
         scenes.ApplyPending();
         if (scenes.Empty()) break;
 
         float frameTime = ::GetFrameTime();
-        scenes.Update(frameTime);
+        {
+            ProfileScope scope("Update");
+            scenes.Update(frameTime);
+        }
 
         timestep.Advance(frameTime);
-        while (timestep.Step()) scenes.FixedUpdate(timestep.Dt());
+        {
+            ProfileScope scope("FixedUpdate");
+            while (timestep.Step()) scenes.FixedUpdate(timestep.Dt());
+        }
 
         ::BeginDrawing();
+        {
+            ProfileScope scope("Draw");
             scenes.Draw(timestep.Alpha());
-        ::EndDrawing();
+        }
+        {
+            ProfileScope scope("Present (vsync)");     // EndDrawing(): buffer swap and frame wait
+            ::EndDrawing();
+        }
     }
 
     scenes.Clear();
@@ -1302,5 +2009,14 @@ private:
 };
 
 } // namespace rl
+
+// Time the enclosing scope with rl::GlobalProfiler(), compiled out with RL_DISABLE_PROFILER
+#define RL_PROFILE_CONCAT_INNER(a, b) a##b
+#define RL_PROFILE_CONCAT(a, b) RL_PROFILE_CONCAT_INNER(a, b)
+#if defined(RL_DISABLE_PROFILER)
+    #define RL_PROFILE_SCOPE(name) ((void)0)
+#else
+    #define RL_PROFILE_SCOPE(name) ::rl::ProfileScope RL_PROFILE_CONCAT(rlProfileScope_, __LINE__)(name)
+#endif
 
 #endif // RAYLIB_HPP

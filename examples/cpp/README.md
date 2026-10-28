@@ -28,6 +28,7 @@ int main()
 | example | image | shows |
 |---------|-------|-------|
 | [cpp_platformer_2d](cpp_platformer_2d.cpp) | <img src="cpp_platformer_2d.png" alt="cpp_platformer_2d" width="200"> | Scene stack (title, game, pause overlay), 120 Hz physics with interpolation, input actions with gamepad support, coyote time and jump buffering, camera follow with deadzone and bounds, trauma screen shake, procedural sprite animation, tweens |
+| [cpp_ecs_swarm](cpp_ecs_swarm.cpp) | <img src="cpp_ecs_swarm.png" alt="cpp_ecs_swarm" width="200"> | Thousands of particles as ECS entities processed by small systems, input turned into events, live per-system profiler |
 | [cpp_third_person_3d](cpp_third_person_3d.cpp) | <img src="cpp_third_person_3d.png" alt="cpp_third_person_3d" width="200"> | Explicit fixed-step loop, orbit camera, camera-relative movement, quaternion rotations through `Transform`, transform interpolation, lit and fog shader, post-processing pass, all resources RAII-managed |
 
 Controls are listed at the top of each source file. Both examples use only generated assets, so they have no resource folders.
@@ -42,7 +43,10 @@ Controls are listed at the top of each source file. Both examples use only gener
 | Fixed timestep | `rl::FixedTimestep` (`Advance`, `Step`, `Dt`, `Alpha`) | Deterministic physics independent of framerate, with a "spiral of death" clamp. `Alpha()` drives render interpolation. |
 | Interpolation | `rl::Lerp` for `float`, `Vector2`, `Vector3`, `Color`, `Transform` (slerp); `rl::SmoothFactor` | Smooth rendering between physics steps and framerate-independent smoothing. |
 | Input mapping | `rl::InputMap` (`BindKey`, `BindGamepadButton`, `BindAxisKeys`, `BindAxisGamepad`, `GetAxis2D`...) | Gameplay code asks for `"jump"`, not `KEY_SPACE`. Keyboard, mouse and gamepad are unified, with deadzone rescaling and diagonal normalization. |
-| Asset caching | `rl::AssetCache<T>`, `rl::TextureCache`, `ModelCache`, `SoundCache`... | Each file loads once, references are shared, and you can plug in a custom loader (packs, generated assets). |
+| Asset caching and hot reload | `rl::AssetCache<T>` (`Get`, `ReloadChanged`), `rl::TextureCache`, `ModelCache`, `SoundCache`..., `rl::HotShader` | Each file loads once and references are shared. Save a texture, model, sound or shader while the game runs and it reloads in place; a broken save keeps the previous version instead of crashing. |
+| Entity component system | `rl::Registry` (`Create`, `Destroy`, `Add`, `Get`, `TryGet`, `Each<A, B>`), `rl::Entity` | Packed, cache-friendly component storage for thousands of objects. Handles of destroyed entities never become valid again, and any type (including RAII handles) can be a component. |
+| Events | `rl::EventBus` (`Subscribe`, `Emit`, `Queue`, `Flush`), `rl::Subscription` | Systems react to each other without depending on each other. Subscriptions unsubscribe themselves when destroyed, and are safe even if the bus goes first. |
+| Profiling | `RL_PROFILE_SCOPE("name")`, `rl::GlobalProfiler().Draw()` | Live per-system timings as a tree, with `Update`, `FixedUpdate`, `Draw` and `Present` measured by `rl::Run()` automatically. Define `RL_DISABLE_PROFILER` to compile scopes out of release builds. |
 | Scenes | `rl::Scene`, `rl::SceneStack` (`Push`, `Pop`, `Replace`, overlays), `rl::Run()` | Title, gameplay, pause and loading screens. Changes are deferred, so it's safe to switch scenes from inside a scene. |
 | Gameplay timing | `rl::Timer`, `rl::Tween<T>`, `rl::ease::*` | Cooldowns, spawners, UI juice and pickups, with 17 easing curves. |
 | Cameras | `rl::CameraFollow2D`, `rl::ScreenShake` (2D and 3D), `rl::OrbitCamera` | Smooth bounded follow, trauma-based shake and a third-person orbit with camera-relative axes. |
@@ -75,4 +79,7 @@ g++ -std=c++17 -O2 main.cpp -I path/to/raylib/src path/to/libraylib.a -lGL -lm -
 - **Name your scoped objects.** `rl::ScopedDrawing frame;` lasts until the end of the block, but an unnamed temporary `rl::ScopedDrawing{};` ends immediately (constructors are `[[nodiscard]]` to help catch this).
 - **Sample "pressed" input per frame, consume it in fixed steps.** `IsKeyPressed()` is true for one rendered frame, which can contain zero or several fixed steps. Both examples store presses in a buffer timer (`jumpBuffer.Start()`) that the fixed step consumes.
 - **Models don't own their shaders and textures.** `UnloadModel()` frees meshes and material maps but not the assigned shaders and textures, by design, so they can be shared. Keep those in their own `rl::Shader` and `rl::Texture` handles.
+- **Hot reload replaces assets in place.** References from `Get()` see the new version, but raw copies (a `::Texture` copied into a struct) keep the old, unloaded one; read them from the cache again after `ReloadChanged()` returns more than 0. File times have a 1 second resolution, so poll about twice per second.
+- **Put the rarest component first in `Each<>()`.** It walks that component's array and checks the others.
+- **Inside `Each()`, only destroy the current entity.** Collect other changes and apply them after the loop.
 - **Use `Release()` to drop down to C.** It hands ownership back to you as the plain raylib struct.

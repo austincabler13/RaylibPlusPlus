@@ -99,7 +99,7 @@ int main(void)
 
 C++ game layer
 --------------
-raylib also ships [`raylib.hpp`](src/raylib.hpp), an optional header-only C++17 layer with the systems most games need: RAII resources, scoped render states, fixed timestep with interpolation, input action mapping (keyboard, mouse and gamepad), asset caches, a scene stack, tweens and timers, camera follow, screen shake, orbit cameras and sprite animation. Wrappers convert implicitly to raylib types, so the full C API stays available.
+raylib also ships [`raylib.hpp`](src/raylib.hpp), an optional header-only C++17 layer with the systems most games need: RAII resources, scoped render states, fixed timestep with interpolation, input action mapping (keyboard, mouse and gamepad), asset caches with hot reload, an entity component system, an event bus, a frame profiler, a scene stack, tweens and timers, camera follow, screen shake, orbit cameras and sprite animation. Wrappers convert implicitly to raylib types, so the full C API stays available.
 
 ```cpp
 #include "raylib.hpp"
@@ -118,7 +118,7 @@ int main()
 }
 ```
 
-Check the [C++ examples](examples/cpp) for a complete 2D platformer and a 3D third-person controller.
+Check the [C++ examples](examples/cpp) for a complete 2D platformer, a 3D third-person controller and an ECS particle swarm with a live profiler.
 
 build and installation
 ----------------------

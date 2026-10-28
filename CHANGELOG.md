@@ -23,6 +23,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - **2D sprites:** `rl::SpriteSheet`, `rl::SpriteClip`, `rl::SpriteAnimator`, `rl::DrawSprite`.
   - **3D helpers:** `rl::MakeTransform`, `rl::TransformToMatrix`, `rl::DrawModelTransform` (quaternion rotations).
   - **Diagnostics:** `rl::FrameStats`, a rolling frame-time graph with budget and hitch highlighting.
+- **Engine features in `raylib.hpp`** for larger projects:
+  - **Hot reload:** `rl::AssetCache::ReloadChanged()` reloads textures, models, fonts, sounds and other cached assets whose files changed, in place, keeping the previous version when a save is broken. `rl::HotShader` does the same for shaders and falls back to the default shader if none has compiled yet.
+  - **Entity component system:** `rl::Registry` with sparse-set storage, generation-checked `rl::Entity` handles, `Add`/`Get`/`TryGet`/`Remove`/`Has`, and `Each<A, B, ...>()` iteration that tolerates destroying the current entity.
+  - **Event bus:** `rl::EventBus` with immediate `Emit()` and deferred `Queue()`/`Flush()`, and RAII `rl::Subscription` tokens that stay safe if the bus is destroyed first.
+  - **Profiler:** `RL_PROFILE_SCOPE()` scopes collected by `rl::GlobalProfiler()` and drawn as a tree with average, peak and call counts. `rl::Run()` measures its own phases, and `RL_DISABLE_PROFILER` compiles scopes out.
+- **`examples/cpp/cpp_ecs_swarm`:** up to 20,000 particles as ECS entities, input turned into events, live per-system profiler.
 - **`raymath.h`:** unary minus operators (`-v`) for `Vector2`, `Vector3` and `Vector4` in the C++ operators section.
 - **`examples/cpp/`:** two C++ showcase examples, both using only generated assets:
   - `cpp_platformer_2d`: scene stack (title, game, pause overlay), 120 Hz physics with render interpolation, input actions with gamepad support, coyote time and jump buffering, camera follow and shake, procedural sprite animation, tweens.
